@@ -1,0 +1,121 @@
+import logging
+from logging.handlers import TimedRotatingFileHandler
+import os
+import time
+
+class EnhancedRotatingFileHandler(TimedRotatingFileHandler):
+    def __init__(self, filename, when='h', interval=1, backupCount=0, encoding=None, delay=0, utc=0, maxBytes=0):
+        """ This is just a combination of TimedRotatingFileHandler and RotatingFileHandler (adds maxBytes to TimedRotatingFileHandler)  """
+        logging.handlers.TimedRotatingFileHandler.__init__(self, filename, when, interval, backupCount, encoding, delay, utc)
+        self.maxBytes=maxBytes
+
+    def shouldRollover(self, record):
+        """
+        Determine if rollover should occur.
+
+        Basically, see if the supplied record would cause the file to exceed
+        the size limit we have.
+
+        we are also comparing times        
+        """
+        if self.stream is None:                 # delay was set...
+            self.stream = self._open()
+        if self.maxBytes > 0:                   # are we rolling over?
+            msg = "%s\n" % self.format(record)
+            self.stream.seek(0, 2)  #due to non-posix-compliant Windows feature
+            if self.stream.tell() + len(msg) >= self.maxBytes:
+                return 1
+        t = int(time.time())
+        if t >= self.rolloverAt:
+            return 1
+        #print "No need to rollover: %d, %d" % (t, self.rolloverAt)
+        return 0         
+
+    def doRollover(self):
+        """
+        do a rollover; in this case, a date/time stamp is appended to the filename
+        when the rollover happens.  However, you want the file to be named for the
+        start of the interval, not the current time.  If there is a backup count,
+        then we have to get a list of matching filenames, sort them and remove
+        the one with the oldest suffix.
+        """
+        if self.stream:
+            self.stream.close()
+        # get the time that this sequence started at and make it a TimeTuple
+        currentTime = int(time.time())
+        dstNow = time.localtime(currentTime)[-1]
+        t = self.rolloverAt - self.interval
+        if self.utc:
+            timeTuple = time.gmtime(t)
+        else:
+            timeTuple = time.localtime(t)
+            dstThen = timeTuple[-1]
+            if dstNow != dstThen:
+                if dstNow:
+                    addend = 3600
+                else:
+                    addend = -3600
+                timeTuple = time.localtime(t + addend)
+        baseDir, baseFilename = os.path.split(self.baseFilename)
+        prefix, suffix = os.path.splitext(baseFilename)
+        date_part = time.strftime('%Y-%m-%d', timeTuple)
+        dfn_base = os.path.join(baseDir, f"{prefix}_{date_part}")
+        if self.backupCount > 0:
+            for i in range(self.backupCount - 1, 0, -1):
+                sfn = f"{dfn_base}_{i}{suffix}"
+                dfn = f"{dfn_base}_{i+1}{suffix}"
+                if os.path.exists(sfn):
+                    if os.path.exists(dfn):
+                        os.remove(dfn)
+                    os.rename(sfn, dfn)
+            os.rename(self.baseFilename, f"{dfn_base}_1{suffix}")
+        else:
+            os.rename(self.baseFilename, f"{dfn_base}_1{suffix}")
+        self.mode = 'w'
+        self.stream = self._open()
+        newRolloverAt = self.computeRollover(currentTime)
+        while newRolloverAt <= currentTime:
+            newRolloverAt = newRolloverAt + self.interval
+        if (self.when == 'MIDNIGHT' or self.when.startswith('W')) and not self.utc:
+            dstAtRollover = time.localtime(newRolloverAt)[-1]
+            if dstNow != dstAtRollover:
+                if not dstNow:  # DST kicks in before next rollover, so we need to deduct an hour
+                    addend = -3600
+                else:           # DST bows out before next rollover, so we need to add an hour
+                    addend = 3600
+                newRolloverAt += addend
+        self.rolloverAt = newRolloverAt
+
+    def getFilesToDelete(self):
+        """
+        Determine the files to delete when rolling over.
+
+        More specific than the earlier method, which just used glob.glob().
+        """
+        dirName, baseName = os.path.split(self.baseFilename)
+        fileNames = os.listdir(dirName)
+        result = []
+        prefix = baseName + "."
+        plen = len(prefix)
+        for fileName in fileNames:
+            if fileName[:plen] == prefix:
+                suffix = fileName[plen:]
+                if self.extMatch.match(suffix):
+                    result.append(os.path.join(dirName, fileName))
+        result.sort()
+        if len(result) < self.backupCount:
+            result = []
+        else:
+            result = result[:len(result) - self.backupCount]
+        return result            
+
+logger = logging.getLogger(__name__)
+handler = EnhancedRotatingFileHandler('test.log', when='S', interval=60, backupCount=15, maxBytes=2000000) # Rotates every minute and maximum file size is 1KB
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+handler.setFormatter(formatter)
+logger.addHandler(handler)
+logger.setLevel(logging.INFO)
+
+# Test the logger
+for i in range(400000):
+    logger.info('This is a test log message %d', i)
